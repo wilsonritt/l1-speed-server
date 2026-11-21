@@ -19,7 +19,7 @@
 # =============================================================================
 set -Eeuo pipefail
 
-VERSION_SCRIPT="1.1.0"
+VERSION_SCRIPT="1.1.1"
 APP="l1speed"
 INSTALL_DIR="/opt/l1speed"
 CONF_DIR="/etc/l1speed"
@@ -304,7 +304,7 @@ check_host_resolves() {
 CERT_MODE=""; CERT_SRC=""; KEY_SRC=""; EMAIL=""; WEBROOT=""
 cert_label() {
     case $CERT_MODE in
-        letsencrypt) echo "Let's Encrypt (${WEBROOT:+webroot $WEBROOT}${WEBROOT:-standalone na porta 80})" ;;
+        letsencrypt) if [[ -n $WEBROOT ]]; then echo "Let's Encrypt (webroot $WEBROOT)"; else echo "Let's Encrypt (standalone na porta 80)"; fi ;;
         existing)    echo "Let's Encrypt já emitido para $HOST" ;;
         files)       echo "arquivos $CERT_SRC" ;;
     esac
@@ -627,27 +627,37 @@ txt_value() {
 print_dns() {
     local txt; txt=$(txt_value)
     local serial; serial=$(date +%Y%m%d)01
-    local out head
+    local hp=$HOST; [[ $PORT != 443 ]] && hp+=":$PORT"
+    local head guide app
     if (( PANEL_OK )); then
         head="==============================================================================
  Pronto: o servidor está no diretório L1 Diag ISP
 ==============================================================================
 
 Os clientes que saem pelas redes aprovadas do provedor já usam este servidor,
-com qualquer DNS. O TXT abaixo é OPCIONAL: serve de reserva quando o app não
-alcança o diretório.
+com qualquer DNS. Não é preciso mexer no DNS.
 
-O app também procura este TXT no DNS da conexão do cliente:"
+O registro TXT abaixo é OPCIONAL. Ele serve de reserva quando o app não
+alcança o diretório, e cobre clientes que saem por um IP que ainda não está
+nas redes aprovadas do painel. O app procura este TXT no DNS do cliente:"
+        app="--- No app --------------------------------------------------------------------
+
+Num celular que sai por uma rede aprovada (Wi-Fi de um cliente, por exemplo):
+Velocidade > Servidor > Automático deve mostrar \"$NAME\".
+De qualquer rede: Servidor > Servidor do provedor, digitando $hp"
     else
         head="==============================================================================
  Falta só o DNS: registro TXT nos resolvers (BIND) que atendem os clientes
 ==============================================================================
 
 O app L1 Diag procura este TXT no DNS da conexão do cliente:"
-    fi
-    out=$(cat <<EOF
-$head
+        app="--- No app --------------------------------------------------------------------
 
+Velocidade > Servidor > Automático: deve aparecer \"$NAME\".
+Antes do DNS, já dá para testar em Servidor > Servidor do provedor,
+digitando: $hp"
+    fi
+    guide=$(cat <<EOF
   Nome:  $TXT_NAME
   Valor: "$txt"
 
@@ -694,18 +704,15 @@ $TXT_NAME.rpz.provedor. 300 IN TXT "$txt"
 dig @IP_DO_RESOLVER TXT $TXT_NAME +short
 dig @IP_DO_RESOLVER l1sistemas.com.br +short   # deve dar o mesmo que:
 dig @1.1.1.1 l1sistemas.com.br +short
-
---- No app --------------------------------------------------------------------
-
-Velocidade > Servidor > Automático: deve aparecer "$NAME".
-Antes do DNS, já dá para testar em Servidor > Servidor do provedor,
-digitando: $HOST$([[ $PORT != 443 ]] && echo ":$PORT")
-
-Este texto foi salvo em $DNS_NOTES
 EOF
 )
-    printf '%s\n' "$out" > "$DNS_NOTES"
-    printf '\n%s%s%s\n' "$B" "$out" "$RST"
+    printf '%s\n\n%s\n\n%s\n' "$head" "$guide" "$app" > "$DNS_NOTES"
+    if (( PANEL_OK )); then
+        printf '\n%s%s\n\n  Nome:  %s\n  Valor: "%s"\n\nO passo a passo para BIND (zona só para esse nome, ou RPZ) está em\n%s\n\n%s%s\n' \
+            "$B" "$head" "$TXT_NAME" "$txt" "$DNS_NOTES" "$app" "$RST"
+    else
+        printf '\n%s%s\n\n%s\n\n%s\n\nEste texto foi salvo em %s%s\n' "$B" "$head" "$guide" "$app" "$DNS_NOTES" "$RST"
+    fi
 }
 
 # ----------------------------------------------------------------------------- remover
