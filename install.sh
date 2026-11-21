@@ -227,7 +227,7 @@ ask_answers() {
 
     # Nome no app
     info ""
-    info "Nome que aparece no app L1 Diag durante o teste. Ex.: RBT Telecom 10G"
+    info "Nome que aparece no app L1 Diag durante o teste. Ex.: Provedor Exemplo 10G"
     ask NAME "Nome no teste" "${L1S_NAME:-${NAME:-Speedtest $HOST}}"
     NAME=${NAME//[;\"]/}
 

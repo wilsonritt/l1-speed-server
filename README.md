@@ -38,7 +38,7 @@ O script pergunta:
 | Pergunta | Para que serve |
 | --- | --- |
 | Nome do servidor | Nome público com registro A/AAAA, ex.: `speed1.provedor.com.br`. O certificado HTTPS sai para ele. |
-| Nome no teste | O que o cliente vê no app durante o teste, ex.: `RBT Telecom 10G`. |
+| Nome no teste | O que o cliente vê no app durante o teste, ex.: `Provedor Exemplo 10G`. |
 | Site do provedor | Opcional. Vai junto no registro DNS. |
 | Porta | Mostra as portas em uso e sugere uma livre (8443, 9443...). Recusa porta ocupada. |
 | Prioridade | Com mais de um servidor, o app usa primeiro o menor número. |
@@ -87,7 +87,7 @@ TXT para os resolvers BIND que atendem os clientes, com dois jeitos de criar:
 O valor do registro fica assim:
 
 ```
-v=l1speed1; url=https://speed1.provedor.com.br:8443/; nome=RBT Telecom 10G; prio=10; site=https://provedor.com.br
+v=l1speed1; url=https://speed1.provedor.com.br:8443/; nome=Provedor Exemplo 10G; prio=10; site=https://provedor.com.br
 ```
 
 Antes do DNS, já dá para testar no app: **Velocidade > Servidor > Servidor do
@@ -108,7 +108,7 @@ Com `--yes`, o script usa as variáveis abaixo (ou as respostas anteriores) e
 não pergunta nada:
 
 ```sh
-sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="RBT Telecom 10G" L1S_PORT=8443 \
+sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="Provedor Exemplo 10G" L1S_PORT=8443 \
      L1S_CERT=letsencrypt L1S_EMAIL=noc@provedor.com.br bash install.sh --yes
 ```
 
