@@ -9,7 +9,22 @@ O script instala o [LibreSpeed speedtest-go](https://github.com/librespeed/speed
 com HTTPS, como serviço do systemd, testa tudo e no fim mostra o registro DNS
 (BIND) que falta criar.
 
-## Instalar
+## Instalar pelo painel L1 Diag ISP (recomendado)
+
+No [painel L1 Diag ISP](https://isp.l1diag.l1sistemas.com.br), em
+**Adicionar servidor**, preencha o nome de exibição, o nome DNS, os IPs e a
+prioridade. O painel gera um comando pronto:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh && sudo bash install.sh --codigo xxxxx-xxxxx-xxxxx-xxxxx
+```
+
+Com o código, o script já sabe o nome, o nome DNS, o site e a prioridade. Ele
+só pergunta a porta e o certificado. No fim, registra o servidor no painel:
+os clientes que saem pelas redes aprovadas do provedor passam a usá-lo com
+qualquer DNS, sem registro no BIND.
+
+## Instalar sem o painel
 
 No servidor (Debian, Ubuntu, Rocky, Alma ou similar, com systemd), como root:
 
@@ -56,17 +71,17 @@ Depois mostra um resumo e só instala se você confirmar.
 O firewall (ufw ou firewalld) é liberado na porta escolhida quando está ativo.
 Com Let's Encrypt, um hook copia o certificado renovado e reinicia o serviço.
 
-## Falta só o DNS
+## DNS (sem o painel, ou como reserva)
 
 No fim, o script imprime (e salva em `/etc/l1speed/DNS-BIND.txt`) o registro
 TXT para os resolvers BIND que atendem os clientes, com dois jeitos de criar:
 
-- **Zona local só para o nome `_speedtest.l1diag.l1consultoria.com.br`** (recomendado).
+- **Zona local só para o nome `_speedtest.l1diag.l1sistemas.com.br`** (recomendado).
 - **Uma linha na RPZ**, para quem já usa RPZ.
 
 > **Importante:** crie a zona ou a regra só para o nome exato
-> `_speedtest.l1diag.l1consultoria.com.br`. **Nunca** crie zona nem RPZ para
-> `l1consultoria.com.br` inteiro (ou `*.l1consultoria.com.br`): os clientes
+> `_speedtest.l1diag.l1sistemas.com.br`. **Nunca** crie zona nem RPZ para
+> `l1sistemas.com.br` inteiro (ou `*.l1sistemas.com.br`): os clientes
 > perderiam o acesso aos sites e serviços da L1.
 
 O valor do registro fica assim:
@@ -110,12 +125,14 @@ sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="RBT Telecom 10G" L1S_PORT=8443 \
 | `L1S_WEBROOT` | Pasta pública, se a porta 80 já tiver um site. |
 | `L1S_CERT_FILE`, `L1S_KEY_FILE` | Certificado (fullchain) e chave, com `L1S_CERT=files`. |
 | `L1S_BACKEND_VERSION` | Versão do speedtest-go, ex.: `1.1.5`. Padrão: a mais nova. |
+| `L1S_CODIGO` | Código gerado no painel (o mesmo que `--codigo`). |
+| `L1S_ISP_URL` | Endereço do painel. Padrão: `https://isp.l1diag.l1sistemas.com.br`. |
 | `L1S_BACKEND_FILE` | Pacote `.tar.gz` local do speedtest-go, para servidor sem acesso ao GitHub. |
 
 ## Problemas comuns
 
 - **O app não acha o servidor no modo Automático:** confira com
-  `dig @IP_DO_RESOLVER TXT _speedtest.l1diag.l1consultoria.com.br +short` e
+  `dig @IP_DO_RESOLVER TXT _speedtest.l1diag.l1sistemas.com.br +short` e
   se o cliente usa esse resolver (com DNS 1.1.1.1 ou 8.8.8.8 no aparelho, o
   app não vê o registro e usa a Cloudflare).
 - **"Certificado não aceito":** o app exige certificado válido para o nome,

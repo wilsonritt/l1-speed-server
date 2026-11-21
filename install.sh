@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1090,SC2015,SC2031,SC1091
+# shellcheck disable=SC1090,SC2015,SC2031,SC1091,SC2153
 # =============================================================================
 #  L1 Diag - instalador do servidor de velocidade do provedor
 #
@@ -10,6 +10,7 @@
 #  Uso:
 #    curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh
 #    sudo bash install.sh              # instala ou reconfigura
+#    sudo bash install.sh --codigo X   # usa os dados do painel L1 Diag ISP e registra lá no fim
 #    sudo bash install.sh --uninstall  # remove
 #
 #  Sem perguntas (todas as variáveis L1S_* estão no README):
@@ -18,7 +19,7 @@
 # =============================================================================
 set -Eeuo pipefail
 
-VERSION_SCRIPT="1.0.0"
+VERSION_SCRIPT="1.1.0"
 APP="l1speed"
 INSTALL_DIR="/opt/l1speed"
 CONF_DIR="/etc/l1speed"
@@ -29,11 +30,15 @@ UNIT="/etc/systemd/system/$APP.service"
 SYSCTL_FILE="/etc/sysctl.d/90-l1speed.conf"
 LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/l1speed.sh"
 DNS_NOTES="$CONF_DIR/DNS-BIND.txt"
-TXT_NAME="_speedtest.l1diag.l1consultoria.com.br"
+TXT_NAME="_speedtest.l1diag.l1sistemas.com.br"
+ISP_URL="${L1S_ISP_URL:-https://isp.l1diag.l1sistemas.com.br}"
+CODE="${L1S_CODIGO:-}"
+FROM_PANEL=0
 UPSTREAM_REPO="librespeed/speedtest-go"
 SUGGESTED_PORTS=(8443 9443 10443 18443)
 
 ASSUME_YES=0
+PANEL_OK=0
 ACTION="install"
 
 # ----------------------------------------------------------------------------- saída
@@ -81,14 +86,17 @@ confirm() { # confirm "Pergunta" s|n
 
 # ----------------------------------------------------------------------------- argumentos
 
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --uninstall|--remover) ACTION="uninstall" ;;
         --yes|-y)              ASSUME_YES=1 ;;
+        --codigo|--code)       [[ $# -ge 2 ]] || die "--codigo precisa do código gerado no painel."; CODE=$2; shift ;;
+        --codigo=*|--code=*)   CODE=${1#*=} ;;
         --help|-h)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) die "opção desconhecida: $arg (use --help)" ;;
+            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "opção desconhecida: $1 (use --help)" ;;
     esac
+    shift
 done
 
 [[ $EUID -eq 0 ]] || die "rode como root: sudo bash $0"
@@ -161,13 +169,51 @@ list_ports() {
         | sort -n -u -k1,1 | while read -r p proc; do printf '      %-6s %s\n' "$p" "${proc:--}"; done
 }
 
+# ----------------------------------------------------------------------------- painel L1 Diag ISP
+
+json_str() { grep -o "\"$1\": *\"[^\"]*\"" <<<"$2" | head -1 | sed 's/.*: *"\(.*\)"/\1/' || true; }
+json_num() { grep -o "\"$1\": *[0-9]*" <<<"$2" | head -1 | grep -o '[0-9]*$' || true; }
+
+fetch_panel() {
+    [[ -n $CODE ]] || return 0
+    step "Buscando os dados no painel L1 Diag ISP"
+    local resp
+    resp=$(curl -fsS --max-time 20 "$ISP_URL/v1/instalacao/$CODE" 2>/dev/null) \
+        || die "o painel não reconheceu o código (vencido ou já trocado?). Gere outro em $ISP_URL/painel"
+    local host name site prio prov
+    host=$(json_str host "$resp"); name=$(json_str nome "$resp"); site=$(json_str site "$resp")
+    prio=$(json_num prio "$resp"); prov=$(json_str provedor "$resp")
+    valid_host "$host" || die "resposta inesperada do painel: $resp"
+    L1S_HOST=$host; L1S_NAME=${name:-$host}; L1S_SITE=$site; L1S_PRIO=${prio:-10}
+    FROM_PANEL=1
+    ok "$prov: $L1S_NAME ($host)"
+}
+
+register_done() {
+    (( FROM_PANEL )) || return 0
+    step "Registrando no painel L1 Diag ISP"
+    local url="https://$HOST:$PORT/" resp msg
+    [[ $PORT == 443 ]] && url="https://$HOST/"
+    resp=$(curl -sS --max-time 40 -X POST -H 'Content-Type: application/json' \
+        --data "{\"url\":\"$url\"}" "$ISP_URL/v1/instalacao/$CODE/concluida" 2>&1) || true
+    msg=$(json_str mensagem "$resp"); [[ -n $msg ]] || msg=$(json_str erro "$resp")
+    if grep -q '"ok": *true' <<<"$resp"; then
+        ok "${msg:-registrado}"
+        PANEL_OK=1
+    else
+        warn "${msg:-o painel não respondeu: $resp}"
+        warn "Depois de corrigir, use \"Testar agora\" no painel ou rode este instalador de novo com o mesmo código."
+    fi
+}
+
 ask_answers() {
     step "Configuração"
     [[ -r $ANSWERS ]] && { info "Respostas anteriores carregadas de $ANSWERS"; . "$ANSWERS"; }
 
     # Nome do servidor
     local host=${L1S_HOST:-${HOST:-}}
-    while :; do
+    if (( FROM_PANEL )); then info ""; info "Nome do servidor (do painel): $host"; fi
+    while (( ! FROM_PANEL )); do
         info ""
         info "Nome público (DNS) deste servidor, com certificado HTTPS. Ex.: speed1.provedor.com.br"
         ask host "Nome do servidor" "$host"
@@ -581,13 +627,26 @@ txt_value() {
 print_dns() {
     local txt; txt=$(txt_value)
     local serial; serial=$(date +%Y%m%d)01
-    local out
-    out=$(cat <<EOF
+    local out head
+    if (( PANEL_OK )); then
+        head="==============================================================================
+ Pronto: o servidor está no diretório L1 Diag ISP
 ==============================================================================
+
+Os clientes que saem pelas redes aprovadas do provedor já usam este servidor,
+com qualquer DNS. O TXT abaixo é OPCIONAL: serve de reserva quando o app não
+alcança o diretório.
+
+O app também procura este TXT no DNS da conexão do cliente:"
+    else
+        head="==============================================================================
  Falta só o DNS: registro TXT nos resolvers (BIND) que atendem os clientes
 ==============================================================================
 
-O app L1 Diag procura este TXT no DNS da conexão do cliente:
+O app L1 Diag procura este TXT no DNS da conexão do cliente:"
+    fi
+    out=$(cat <<EOF
+$head
 
   Nome:  $TXT_NAME
   Valor: "$txt"
@@ -595,7 +654,7 @@ O app L1 Diag procura este TXT no DNS da conexão do cliente:
 Com mais de um servidor, crie um TXT para cada um (o app testa primeiro o menor prio).
 
 IMPORTANTE: crie a zona SÓ para o nome exato acima. Não crie zona nem RPZ
-para l1consultoria.com.br ou *.l1consultoria.com.br, ou os clientes perdem
+para l1sistemas.com.br ou *.l1sistemas.com.br, ou os clientes perdem
 o acesso aos sites e serviços da L1.
 
 --- Opção A (recomendada): zona local só para o nome do teste --------------
@@ -633,8 +692,8 @@ $TXT_NAME.rpz.provedor. 300 IN TXT "$txt"
 --- Conferir ------------------------------------------------------------------
 
 dig @IP_DO_RESOLVER TXT $TXT_NAME +short
-dig @IP_DO_RESOLVER l1consultoria.com.br +short   # deve dar o mesmo que:
-dig @1.1.1.1 l1consultoria.com.br +short
+dig @IP_DO_RESOLVER l1sistemas.com.br +short   # deve dar o mesmo que:
+dig @1.1.1.1 l1sistemas.com.br +short
 
 --- No app --------------------------------------------------------------------
 
@@ -680,6 +739,7 @@ main() {
     detect_system
     if [[ $ACTION == uninstall ]]; then uninstall; exit 0; fi
     ensure_tools
+    fetch_panel
     ask_answers
     create_user
     download_backend
@@ -690,6 +750,7 @@ main() {
     start_service
     self_test
     save_answers
+    register_done
     print_dns
     printf '\n%s✓ Instalação concluída.%s Servidor: https://%s:%s/\n' "$GRN$B" "$RST" "$HOST" "$PORT"
     if (( CERT_WARNING )); then warn "corrija o certificado antes de configurar o DNS: o app não aceita o atual."; fi
