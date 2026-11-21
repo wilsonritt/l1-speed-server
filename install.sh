@@ -10,7 +10,7 @@
 #  Uso:
 #    curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh
 #    sudo bash install.sh              # instala ou reconfigura
-#    sudo bash install.sh --codigo X   # usa os dados do painel L1 Diag ISP e registra lá no fim
+#    sudo bash install.sh --code X     # usa os dados do painel L1 Diag ISP e registra lá no fim
 #    sudo bash install.sh --uninstall  # remove
 #
 #  Sem perguntas (todas as variáveis L1S_* estão no README):
@@ -32,7 +32,7 @@ LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/l1speed.sh"
 DNS_NOTES="$CONF_DIR/DNS-BIND.txt"
 TXT_NAME="_speedtest.l1diag.l1sistemas.com.br"
 ISP_URL="${L1S_ISP_URL:-https://isp.l1diag.l1sistemas.com.br}"
-CODE="${L1S_CODIGO:-}"
+CODE="${L1S_CODE:-}"
 FROM_PANEL=0
 UPSTREAM_REPO="librespeed/speedtest-go"
 SUGGESTED_PORTS=(8443 9443 10443 18443)
@@ -88,10 +88,10 @@ confirm() { # confirm "Pergunta" s|n
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --uninstall|--remover) ACTION="uninstall" ;;
+        --uninstall)           ACTION="uninstall" ;;
         --yes|-y)              ASSUME_YES=1 ;;
-        --codigo|--code)       [[ $# -ge 2 ]] || die "--codigo precisa do código gerado no painel."; CODE=$2; shift ;;
-        --codigo=*|--code=*)   CODE=${1#*=} ;;
+        --code)                [[ $# -ge 2 ]] || die "--code precisa do código gerado no painel."; CODE=$2; shift ;;
+        --code=*)              CODE=${1#*=} ;;
         --help|-h)
             sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "opção desconhecida: $1 (use --help)" ;;
@@ -178,11 +178,11 @@ fetch_panel() {
     [[ -n $CODE ]] || return 0
     step "Buscando os dados no painel L1 Diag ISP"
     local resp
-    resp=$(curl -fsS --max-time 20 "$ISP_URL/v1/instalacao/$CODE" 2>/dev/null) \
+    resp=$(curl -fsS --max-time 20 "$ISP_URL/v1/install/$CODE" 2>/dev/null) \
         || die "o painel não reconheceu o código (vencido ou já trocado?). Gere outro em $ISP_URL/painel"
     local host name site prio prov
-    host=$(json_str host "$resp"); name=$(json_str nome "$resp"); site=$(json_str site "$resp")
-    prio=$(json_num prio "$resp"); prov=$(json_str provedor "$resp")
+    host=$(json_str host "$resp"); name=$(json_str name "$resp"); site=$(json_str site "$resp")
+    prio=$(json_num prio "$resp"); prov=$(json_str provider "$resp")
     valid_host "$host" || die "resposta inesperada do painel: $resp"
     L1S_HOST=$host; L1S_NAME=${name:-$host}; L1S_SITE=$site; L1S_PRIO=${prio:-10}
     FROM_PANEL=1
@@ -195,8 +195,8 @@ register_done() {
     local url="https://$HOST:$PORT/" resp msg
     [[ $PORT == 443 ]] && url="https://$HOST/"
     resp=$(curl -sS --max-time 40 -X POST -H 'Content-Type: application/json' \
-        --data "{\"url\":\"$url\"}" "$ISP_URL/v1/instalacao/$CODE/concluida" 2>&1) || true
-    msg=$(json_str mensagem "$resp"); [[ -n $msg ]] || msg=$(json_str erro "$resp")
+        --data "{\"url\":\"$url\"}" "$ISP_URL/v1/install/$CODE/complete" 2>&1) || true
+    msg=$(json_str message "$resp"); [[ -n $msg ]] || msg=$(json_str error "$resp")
     if grep -q '"ok": *true' <<<"$resp"; then
         ok "${msg:-registrado}"
         PANEL_OK=1

@@ -16,7 +16,7 @@ No [painel L1 Diag ISP](https://isp.l1diag.l1sistemas.com.br), em
 prioridade. O painel gera um comando pronto:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh && sudo bash install.sh --codigo xxxxx-xxxxx-xxxxx-xxxxx
+curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh && sudo bash install.sh --code xxxxx-xxxxx-xxxxx-xxxxx
 ```
 
 Com o código, o script já sabe o nome, o nome DNS, o site e a prioridade. Ele
@@ -125,7 +125,7 @@ sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="RBT Telecom 10G" L1S_PORT=8443 \
 | `L1S_WEBROOT` | Pasta pública, se a porta 80 já tiver um site. |
 | `L1S_CERT_FILE`, `L1S_KEY_FILE` | Certificado (fullchain) e chave, com `L1S_CERT=files`. |
 | `L1S_BACKEND_VERSION` | Versão do speedtest-go, ex.: `1.1.5`. Padrão: a mais nova. |
-| `L1S_CODIGO` | Código gerado no painel (o mesmo que `--codigo`). |
+| `L1S_CODE` | Código gerado no painel (o mesmo que `--code`). |
 | `L1S_ISP_URL` | Endereço do painel. Padrão: `https://isp.l1diag.l1sistemas.com.br`. |
 | `L1S_BACKEND_FILE` | Pacote `.tar.gz` local do speedtest-go, para servidor sem acesso ao GitHub. |
 
