@@ -872,10 +872,61 @@ write_status() { # write_status ok|falhou [o que falhou]
         "$inst" "$(installed_backend)" "$auto" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-}" > "$www/l1speed.json.new"
     chmod 0644 "$www/l1speed.json.new"
     mv -f "$www/l1speed.json.new" "$www/l1speed.json"
-    if [[ ! -f $www/index.html ]]; then
-        printf '<!doctype html><meta charset="utf-8"><title>L1 Diag</title><p>Servidor de velocidade do L1 Diag.</p>\n' > "$www/index.html"
-        chmod 0644 "$www/index.html"
-    fi
+    write_index "$www/index.html"
+}
+
+html_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+
+# Página de quem abre o endereço do servidor no navegador: com a cara do L1 Diag e um botão que faz o teste
+# completo pelo painel (no lugar da página padrão do LibreSpeed).
+write_index() {
+    local url="https://$HOST:$PORT/" name isp test
+    [[ $PORT == 443 ]] && url="https://$HOST/"
+    name=$(html_escape "${NAME:-$HOST}")
+    isp=$(html_escape "$ISP_URL")
+    test="$isp/teste?s=$(printf '%s' "$url" | sed 's/:/%3A/g; s|/|%2F|g')"
+    cat > "$1.new" <<HTML
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teste de velocidade · $name · L1 Diag</title>
+<link rel="icon" href="$isp/static/icon-32.png">
+<style>
+:root { --bg: #f4f6fa; --card: #fff; --ink: #0f172a; --muted: #5b6474; --accent: #1e78d2; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0b1220; --card: #111a2e; --ink: #e6ebf5; --muted: #9aa6bd; --accent: #4c9bec; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--ink);
+       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { background: var(--card); border-radius: 16px; padding: 32px 24px; max-width: 420px; width: 100%; text-align: center;
+       box-shadow: 0 10px 30px rgba(15, 23, 42, .08); }
+img { width: 64px; height: 64px; border-radius: 14px; }
+h1 { font-size: 22px; margin: 16px 0 4px; }
+p { margin: 0 0 8px; color: var(--muted); }
+p a { color: var(--accent); }
+.name { color: var(--ink); font-weight: 600; }
+a.btn { display: inline-block; margin: 20px 0 12px; padding: 12px 28px; border-radius: 999px; background: var(--accent); color: #fff;
+        font-weight: 600; text-decoration: none; }
+small { display: block; margin-top: 20px; color: var(--muted); font-size: 12px; }
+small a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <img src="$isp/static/apple-touch-icon.png" alt="L1 Diag">
+  <h1>Teste de velocidade</h1>
+  <p class="name">$name</p>
+  <p>Servidor de teste do seu provedor, dentro da rede dele.</p>
+  <a class="btn" href="$test">Iniciar o teste</a>
+  <p>Ou use o app <a href="$isp/">L1 Diag</a>, que também faz o diagnóstico do Wi-Fi e da conexão.</p>
+  <small>L1 Diag · medição feita com o <a href="https://github.com/librespeed/speedtest-go">LibreSpeed speedtest-go</a> (LGPL-3.0)</small>
+</main>
+</body>
+</html>
+HTML
+    chmod 0644 "$1.new"
+    mv -f "$1.new" "$1"
 }
 
 # newer A B: A é uma versão mais nova que B.

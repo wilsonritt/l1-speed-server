@@ -67,6 +67,7 @@ Depois mostra um resumo e só instala se você confirmar.
 | `/etc/l1speed/DNS-BIND.txt` | As instruções de DNS mostradas no fim. |
 | `l1speed.service` | Serviço do systemd, com usuário próprio e sem acesso de escrita ao sistema. |
 | `/etc/sysctl.d/90-l1speed.conf` | Ajustes de rede, se você aceitar. |
+| `/opt/l1speed/www/index.html` | Página de quem abre o endereço do servidor no navegador: com a cara do L1 Diag e um botão que faz o teste completo pelo painel, no lugar da página padrão do LibreSpeed. |
 | `/opt/l1speed/www/l1speed.json` | Versão e resultado da última atualização, lido pelo painel L1 Diag ISP em `https://servidor:porta/l1speed.json`. |
 | `/usr/local/sbin/l1speed` | Cópia do instalador, usada pela atualização automática. |
 | `l1speed-update.timer` | Atualização automática diária (veja abaixo). |
@@ -180,5 +181,6 @@ sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="Provedor Exemplo 10G" L1S_PORT=84
 
 ## Licença
 
-MIT. O LibreSpeed speedtest-go é baixado do repositório oficial e segue a
-licença dele (LGPL-3.0).
+MIT. O LibreSpeed speedtest-go é baixado do repositório oficial, sem
+modificação, e segue a licença dele (LGPL-3.0). A página do servidor é do
+L1 Diag (não usa a interface do LibreSpeed) e dá o crédito ao speedtest-go.
