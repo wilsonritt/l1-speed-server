@@ -1,0 +1,23 @@
+name: release
+# Publica uma versão do instalador. Os servidores dos provedores com atualização
+# automática pegam a última Release (não o main) na madrugada seguinte.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh
+      - run: shellcheck install.sh
+      - name: Tag igual à versão do instalador
+        run: |
+          v=$(sed -n 's/^VERSION_SCRIPT="\(.*\)"$/\1/p' install.sh)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::a tag $GITHUB_REF_NAME não bate com VERSION_SCRIPT=$v"; exit 1; }
+      - name: Criar a Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" install.sh --title "Instalador $GITHUB_REF_NAME" --generate-notes

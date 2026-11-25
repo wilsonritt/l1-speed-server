@@ -11,7 +11,14 @@
 #    curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh
 #    sudo bash install.sh              # instala ou reconfigura
 #    sudo bash install.sh --code X     # usa os dados do painel L1 Diag ISP e registra lá no fim
+#    sudo bash install.sh --update     # atualiza agora, sem perguntas (volta sozinho se falhar)
 #    sudo bash install.sh --uninstall  # remove
+#
+#  Atualização automática: a instalação cria o timer l1speed-update, que todo
+#  dia de madrugada baixa o instalador da última versão publicada e o
+#  speedtest-go mais novo. Se o serviço não passar no teste depois de
+#  atualizar, volta sozinho para a versão anterior. Para desligar:
+#    sudo bash install.sh --no-auto-update
 #
 #  Sem perguntas (todas as variáveis L1S_* estão no README):
 #    sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="Provedor 10G" L1S_PORT=8443 \
@@ -19,7 +26,7 @@
 # =============================================================================
 set -Eeuo pipefail
 
-VERSION_SCRIPT="1.1.1"
+VERSION_SCRIPT="1.2.0"
 APP="l1speed"
 INSTALL_DIR="/opt/l1speed"
 CONF_DIR="/etc/l1speed"
@@ -35,11 +42,19 @@ ISP_URL="${L1S_ISP_URL:-https://isp.l1diag.l1sistemas.com.br}"
 CODE="${L1S_CODE:-}"
 FROM_PANEL=0
 UPSTREAM_REPO="librespeed/speedtest-go"
+SELF_REPO="wilsonritt/l1-speed-server"
+SELF_BIN="/usr/local/sbin/l1speed"
+STATE_DIR="/var/lib/l1speed"
+UPD_UNIT="/etc/systemd/system/$APP-update.service"
+UPD_TIMER="/etc/systemd/system/$APP-update.timer"
+UPD_LOCK="/run/$APP-update.lock"
 SUGGESTED_PORTS=(8443 9443 10443 18443)
 
 ASSUME_YES=0
 PANEL_OK=0
 ACTION="install"
+SELF_UPDATE=1
+TOGGLE=0
 
 # ----------------------------------------------------------------------------- saída
 
@@ -55,7 +70,18 @@ ok()    { printf '    %s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn()  { printf '    %s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()   { printf '\n%sErro:%s %s\n' "$RED$B" "$RST" "$*" >&2; exit 1; }
 
-trap 'die "falha na linha $LINENO: $BASH_COMMAND"' ERR
+on_error() { die "falha na linha $1: $2"; }
+trap 'on_error $LINENO "$BASH_COMMAND"' ERR
+
+# try CMD...: roda CMD num subshell que para no primeiro erro, sem derrubar este script. O código de saída fica em
+# TRY_RC. (Com "try CMD || ...", o bash ignoraria o set -e lá dentro, por isso o código vai numa variável.)
+TRY_RC=0
+try() {
+    trap - ERR; set +e
+    ( set -e; trap 'on_error $LINENO "$BASH_COMMAND"' ERR; "$@" )
+    TRY_RC=$?
+    set -e; trap 'on_error $LINENO "$BASH_COMMAND"' ERR
+}
 
 # Lê do terminal mesmo quando o script vem por "curl | bash".
 TTY=/dev/tty
@@ -89,17 +115,24 @@ confirm() { # confirm "Pergunta" s|n
 while [[ $# -gt 0 ]]; do
     case $1 in
         --uninstall)           ACTION="uninstall" ;;
+        --update|update)       ACTION="update" ;;
+        --no-self-update)      SELF_UPDATE=0 ;;
+        --no-auto-update)      L1S_AUTO_UPDATE=n; TOGGLE=1 ;;
+        --auto-update)         L1S_AUTO_UPDATE=s; TOGGLE=1 ;;
         --yes|-y)              ASSUME_YES=1 ;;
         --code)                [[ $# -ge 2 ]] || die "--code precisa do código gerado no painel."; CODE=$2; shift ;;
         --code=*)              CODE=${1#*=} ;;
         --help|-h)
-            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "opção desconhecida: $1 (use --help)" ;;
     esac
     shift
 done
 
 [[ $EUID -eq 0 ]] || die "rode como root: sudo bash $0"
+
+# Num servidor já instalado, --no-auto-update / --auto-update só ligam ou desligam o timer.
+if [[ $ACTION == install && $TOGGLE -eq 1 && -z $CODE && -r $ANSWERS ]]; then ACTION="toggle"; fi
 
 # ----------------------------------------------------------------------------- sistema
 
@@ -275,6 +308,10 @@ ask_answers() {
     if [[ -n ${L1S_TUNE:-} ]]; then TUNE=$L1S_TUNE
     elif confirm "Aplicar os ajustes de rede?" "${TUNE:-s}"; then TUNE=s; else TUNE=n; fi
 
+    # Atualização automática: ligada, a menos que o provedor peça para desligar.
+    AUTO_UPDATE=${L1S_AUTO_UPDATE:-${AUTO_UPDATE:-s}}
+    [[ $AUTO_UPDATE == n* ]] && AUTO_UPDATE=n || AUTO_UPDATE=s
+
     step "Resumo"
     info "Servidor:     https://$HOST:$PORT/"
     info "Nome no app:  $NAME"
@@ -282,6 +319,7 @@ ask_answers() {
     info "Prioridade:   $PRIO"
     info "Certificado:  $(cert_label)"
     info "Ajustes TCP:  $([[ $TUNE == s ]] && echo sim || echo não)"
+    info "Atualização:  $([[ $AUTO_UPDATE == s ]] && echo "automática, de madrugada (desligar: --no-auto-update)" || echo "manual (sudo $SELF_BIN --update)")"
     confirm "Instalar com essas opções?" s || die "instalação cancelada."
 }
 
@@ -417,6 +455,31 @@ EOF
 
 # ----------------------------------------------------------------------------- binário
 
+# Descobre a versão do speedtest-go a instalar: BK_TAG, BK_URL e BK_SUMS. Falha sem sair, para a atualização poder
+# só pular o binário quando o GitHub não responde.
+resolve_backend() {
+    BK_TAG=""; BK_URL=""; BK_SUMS=""
+    local suffix="_linux_${GOARCH}.tar.gz"
+    local api="https://api.github.com/repos/$UPSTREAM_REPO/releases/${L1S_BACKEND_VERSION:+tags/v${L1S_BACKEND_VERSION#v}}"
+    [[ -z ${L1S_BACKEND_VERSION:-} ]] && api+="latest"
+    local release; release=$(curl -fsSL --max-time 30 -H "Accept: application/vnd.github+json" "$api" 2>/dev/null || true)
+    if [[ -n $release ]]; then
+        BK_TAG=$(grep -m1 '"tag_name"' <<<"$release" | cut -d'"' -f4 || true)
+        BK_URL=$(grep -o '"browser_download_url": *"[^"]*'"$suffix"'"' <<<"$release" | head -1 | sed 's/.*"\(https[^"]*\)"/\1/' || true)
+        BK_SUMS=$(grep -o '"browser_download_url": *"[^"]*checksums.txt"' <<<"$release" | head -1 | sed 's/.*"\(https[^"]*\)"/\1/' || true)
+    fi
+    if [[ -z $BK_URL || $BK_TAG != v* ]]; then
+        # Sem a API (limite de consultas ou bloqueio): descobre a versão pelo redirecionamento da página.
+        if [[ -n ${L1S_BACKEND_VERSION:-} ]]; then BK_TAG="v${L1S_BACKEND_VERSION#v}"
+        else BK_TAG=$(curl -fsSLI --max-time 30 -o /dev/null -w '%{url_effective}' "https://github.com/$UPSTREAM_REPO/releases/latest" 2>/dev/null | sed 's|.*/tag/||' || true)
+        fi
+        [[ $BK_TAG == v* ]] || return 1
+        local base="https://github.com/$UPSTREAM_REPO/releases/download/$BK_TAG"
+        BK_URL="$base/speedtest-go_${BK_TAG#v}$suffix"
+        BK_SUMS="$base/checksums.txt"
+    fi
+}
+
 download_backend() {
     step "Baixando o LibreSpeed (speedtest-go)"
     local tmp; tmp=$(mktemp -d); WORK_TMP=$tmp; trap 'rm -rf "${WORK_TMP:-}"' EXIT
@@ -426,34 +489,28 @@ download_backend() {
         cp "$L1S_BACKEND_FILE" "$archive"
         info "usando arquivo local $L1S_BACKEND_FILE"
     else
-        local tag url="" sums="" suffix="_linux_${GOARCH}.tar.gz"
-        local api="https://api.github.com/repos/$UPSTREAM_REPO/releases/${L1S_BACKEND_VERSION:+tags/v${L1S_BACKEND_VERSION#v}}"
-        [[ -z ${L1S_BACKEND_VERSION:-} ]] && api+="latest"
-        local release; release=$(curl -fsSL -H "Accept: application/vnd.github+json" "$api" 2>/dev/null || true)
-        if [[ -n $release ]]; then
-            tag=$(grep -m1 '"tag_name"' <<<"$release" | cut -d'"' -f4 || true)
-            url=$(grep -o '"browser_download_url": *"[^"]*'"$suffix"'"' <<<"$release" | head -1 | sed 's/.*"\(https[^"]*\)"/\1/' || true)
-            sums=$(grep -o '"browser_download_url": *"[^"]*checksums.txt"' <<<"$release" | head -1 | sed 's/.*"\(https[^"]*\)"/\1/' || true)
+        if ! resolve_backend; then
+            [[ $ACTION == update ]] || die "não foi possível descobrir a versão do speedtest-go no GitHub."
+            warn "o GitHub não respondeu; o speedtest-go fica como está ($(installed_backend))."
+            return 0
         fi
-        if [[ -z $url ]]; then
-            # Sem a API (limite de consultas ou bloqueio): descobre a versão pelo redirecionamento da página.
-            if [[ -n ${L1S_BACKEND_VERSION:-} ]]; then tag="v${L1S_BACKEND_VERSION#v}"
-            else tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$UPSTREAM_REPO/releases/latest" 2>/dev/null | sed 's|.*/tag/||' || true)
-            fi
-            [[ $tag == v* ]] || die "não foi possível descobrir a versão do speedtest-go no GitHub."
-            local base="https://github.com/$UPSTREAM_REPO/releases/download/$tag"
-            url="$base/speedtest-go_${tag#v}$suffix"
-            sums="$base/checksums.txt"
+        if [[ $ACTION == update && $BK_TAG == "$(installed_backend)" ]]; then
+            ok "speedtest-go $BK_TAG já é o mais novo"
+            return 0
         fi
-        info "versão $tag: $(basename "$url")"
-        curl -fsSL "$url" -o "$archive" || die "falha ao baixar $url"
-        if [[ -n $sums ]]; then
-            local expected; expected=$(curl -fsSL "$sums" | grep " $(basename "$url")\$" | awk '{print $1}')
+        if [[ $ACTION == update && $BK_TAG == "$(cat "$STATE_DIR/failed-backend" 2>/dev/null || true)" ]]; then
+            warn "o speedtest-go $BK_TAG falhou no teste antes; fica no $(installed_backend) até sair uma versão nova."
+            return 0
+        fi
+        info "versão $BK_TAG: $(basename "$BK_URL")"
+        curl -fsSL --max-time 300 "$BK_URL" -o "$archive" || die "falha ao baixar $BK_URL"
+        if [[ -n $BK_SUMS ]]; then
+            local expected; expected=$(curl -fsSL --max-time 30 "$BK_SUMS" | grep " $(basename "$BK_URL")\$" | awk '{print $1}' || true)
             [[ -n $expected ]] || die "o pacote não está em checksums.txt."
             echo "$expected  $archive" | sha256sum -c --quiet - || die "checksum não confere; download corrompido."
             ok "checksum SHA-256 conferido"
         fi
-        echo "$tag" > "$tmp/version"
+        echo "$BK_TAG" > "$tmp/version"
     fi
 
     tar -xzf "$archive" -C "$tmp"
@@ -467,6 +524,8 @@ download_backend() {
     ok "instalado em $INSTALL_DIR"
 }
 
+installed_backend() { cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "versão desconhecida"; }
+
 # ----------------------------------------------------------------------------- configuração e serviço
 
 create_user() {
@@ -476,7 +535,10 @@ create_user() {
 write_settings() {
     step "Configurando o serviço"
     install -d -m 0750 -o root -g "$APP" "$CONF_DIR"
-    local stats_pw; stats_pw=$(openssl rand -hex 16)
+    # Mantém a senha das estatísticas: assim o arquivo só muda quando a configuração muda de verdade.
+    local stats_pw
+    stats_pw=$(sed -n 's/^statistics_password="\([0-9a-f]*\)"$/\1/p' "$SETTINGS" 2>/dev/null | head -1 || true)
+    [[ -n $stats_pw ]] || stats_pw=$(openssl rand -hex 16)
     cat > "$SETTINGS" <<EOF
 # Gerado pelo instalador do L1 Diag ($VERSION_SCRIPT). Para mudar, rode o instalador de novo.
 bind_address=""
@@ -606,6 +668,7 @@ SITE=$(printf '%q' "$SITE")
 PORT=$(printf '%q' "$PORT")
 PRIO=$(printf '%q' "$PRIO")
 TUNE=$(printf '%q' "$TUNE")
+AUTO_UPDATE=$(printf '%q' "$AUTO_UPDATE")
 CERT_MODE=$(printf '%q' "$([[ $CERT_MODE == existing ]] && echo letsencrypt || echo "$CERT_MODE")")
 EMAIL=$(printf '%q' "$EMAIL")
 WEBROOT=$(printf '%q' "$WEBROOT")
@@ -715,6 +778,207 @@ EOF
     fi
 }
 
+# ----------------------------------------------------------------------------- atualização automática
+
+# Caminho deste script, se ele estiver num arquivo (com "curl | bash" não está).
+self_path() {
+    local p=${BASH_SOURCE[0]:-}
+    [[ -n $p && -f $p ]] && readlink -f "$p" || true
+}
+
+# Guarda este instalador em $SELF_BIN: é ele que o timer roda.
+install_self() {
+    local me cur; me=$(self_path)
+    cur=$(sed -n 's/^VERSION_SCRIPT="\(.*\)"$/\1/p' "$SELF_BIN" 2>/dev/null | head -1 || true)
+    [[ -n $cur ]] && newer "$cur" "$VERSION_SCRIPT" && return 0   # o guardado já é mais novo
+    if [[ -n $me ]]; then
+        [[ $me == "$SELF_BIN" ]] && return 0
+        install -m 0755 "$me" "$SELF_BIN.new"
+    else
+        curl -fsSL --max-time 60 "https://raw.githubusercontent.com/$SELF_REPO/main/install.sh" -o "$SELF_BIN.new" \
+            || { warn "não deu para guardar o instalador em $SELF_BIN."; return 0; }
+        chmod 0755 "$SELF_BIN.new"
+    fi
+    mv -f "$SELF_BIN.new" "$SELF_BIN"
+}
+
+setup_auto_update() {
+    install -d -m 0755 "$STATE_DIR"
+    install_self
+    if [[ ${AUTO_UPDATE:-s} == n ]]; then
+        if [[ -f $UPD_TIMER ]]; then
+            systemctl disable --now "$APP-update.timer" >/dev/null 2>&1 || true
+            rm -f "$UPD_TIMER" "$UPD_UNIT"
+            systemctl daemon-reload
+        fi
+        info "atualização automática desligada. Para atualizar: sudo $SELF_BIN --update"
+        return 0
+    fi
+    cat > "$UPD_UNIT" <<EOU
+[Unit]
+Description=Atualização do servidor de velocidade do L1 Diag
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SELF_BIN --update
+Nice=10
+TimeoutStartSec=20min
+EOU
+    cat > "$UPD_TIMER" <<EOU
+[Unit]
+Description=Atualização diária do servidor de velocidade do L1 Diag
+
+[Timer]
+# De madrugada, num horário sorteado em cada servidor, para não reiniciar no meio do uso.
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=3h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOU
+    systemctl daemon-reload
+    systemctl enable --now "$APP-update.timer" >/dev/null 2>&1 \
+        && ok "atualização automática diária ligada (log: journalctl -u $APP-update)" \
+        || warn "não deu para ligar o timer $APP-update.timer."
+}
+
+# Grava uma resposta em $ANSWERS (troca a linha ou acrescenta).
+set_answer() {
+    local line; line="$1=$(printf '%q' "$2")"
+    if grep -q "^$1=" "$ANSWERS"; then sed -i "s|^$1=.*|$line|" "$ANSWERS"; else echo "$line" >> "$ANSWERS"; fi
+}
+
+toggle_auto_update() {
+    step "Atualização automática"
+    AUTO_UPDATE=$L1S_AUTO_UPDATE
+    set_answer AUTO_UPDATE "$AUTO_UPDATE"
+    setup_auto_update
+}
+
+# newer A B: A é uma versão mais nova que B.
+newer() { [[ $1 != "$2" && $(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1) == "$1" ]]; }
+
+# Se há instalador mais novo publicado (Release do GitHub), baixa e passa a vez para ele.
+self_update() {
+    (( SELF_UPDATE )) || return 0
+    step "Procurando instalador novo"
+    local tag v file
+    tag=$(curl -fsSLI --max-time 30 -o /dev/null -w '%{url_effective}' "https://github.com/$SELF_REPO/releases/latest" 2>/dev/null || true)
+    tag=${tag##*/tag/}
+    if ! [[ $tag =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+        info "nenhuma versão publicada encontrada; segue com o instalador $VERSION_SCRIPT."
+        return 0
+    fi
+    v=${tag#v}
+    if ! newer "$v" "$VERSION_SCRIPT"; then
+        ok "instalador $VERSION_SCRIPT é o mais novo"
+        return 0
+    fi
+    if [[ $(cat "$STATE_DIR/failed-script" 2>/dev/null || true) == "$v" ]]; then
+        warn "o instalador $v falhou no teste antes; segue com o $VERSION_SCRIPT até sair uma versão nova."
+        return 0
+    fi
+    install -d -m 0755 "$STATE_DIR"
+    file="$STATE_DIR/install-$v.sh"
+    if ! curl -fsSL --max-time 60 "https://raw.githubusercontent.com/$SELF_REPO/$tag/install.sh" -o "$file" \
+        || ! bash -n "$file" 2>/dev/null || ! grep -qx "VERSION_SCRIPT=\"$v\"" "$file"; then
+        rm -f "$file"
+        warn "não deu para baixar o instalador $v; segue com o $VERSION_SCRIPT."
+        return 0
+    fi
+    ok "instalador $v baixado"
+    export L1S_LOCKED=1 L1S_SELF_UPDATED=1
+    exec bash "$file" --update --no-self-update
+}
+
+# Resumo do que o serviço usa: binário, configuração e unit (sem os comentários).
+service_state() {
+    { sha256sum < "$INSTALL_DIR/speedtest-backend"; grep -hv '^#' "$SETTINGS" "$UNIT" 2>/dev/null; } | sha256sum
+}
+
+update_apply() {
+    download_backend
+    write_settings
+    [[ -f $LE_HOOK ]] && install_le_hook
+    true
+}
+
+restart_and_test() {
+    start_service
+    self_test
+}
+
+update() {
+    if [[ -z ${L1S_LOCKED:-} ]]; then
+        exec 9>"$UPD_LOCK"
+        flock -n 9 || { info "outra atualização já está rodando."; exit 0; }
+    fi
+    [[ -r $ANSWERS && -x $INSTALL_DIR/speedtest-backend ]] \
+        || die "o servidor de velocidade não está instalado aqui. Rode: sudo bash install.sh"
+    self_update
+
+    . "$ANSWERS"
+    AUTO_UPDATE=${L1S_AUTO_UPDATE:-${AUTO_UPDATE:-s}}
+    [[ $AUTO_UPDATE == n* ]] && AUTO_UPDATE=n || AUTO_UPDATE=s
+    set_answer AUTO_UPDATE "$AUTO_UPDATE"
+    [[ -n ${HOST:-} && -n ${PORT:-} ]] || die "respostas incompletas em $ANSWERS. Rode: sudo bash install.sh"
+    create_user
+
+    # Cópia de segurança do que está funcionando agora.
+    local bak="$STATE_DIR/backup" before after was_backend
+    install -d -m 0700 "$STATE_DIR" "$bak"
+    rm -f "$bak"/*
+    cp -p "$INSTALL_DIR/speedtest-backend" "$bak/speedtest-backend"
+    cp -p "$SETTINGS" "$bak/settings.toml"
+    cp -p "$UNIT" "$bak/unit"
+    [[ -f $INSTALL_DIR/VERSION ]] && cp -p "$INSTALL_DIR/VERSION" "$bak/VERSION"
+    was_backend=$(installed_backend)
+    before=$(service_state)
+
+    local failed=0 changed=1
+    try update_apply; (( TRY_RC == 0 )) || failed=1
+    after=$(service_state)
+
+    if (( ! failed )) && [[ $before == "$after" ]]; then
+        ok "nada mudou no serviço; não precisa reiniciar."
+        changed=0
+    elif (( ! failed )) && ! systemctl is-enabled -q "$APP" 2>/dev/null; then
+        ok "atualizado; o serviço está desligado e assim continua."
+    elif (( ! failed )); then
+        CERT_WARNING=0
+        try restart_and_test; (( TRY_RC == 0 )) || failed=1
+    fi
+
+    if (( failed )); then
+        step "Voltando para a versão anterior"
+        [[ $(installed_backend) != "$was_backend" ]] && installed_backend > "$STATE_DIR/failed-backend"
+        [[ -n ${L1S_SELF_UPDATED:-} ]] && echo "$VERSION_SCRIPT" > "$STATE_DIR/failed-script"
+        install -m 0755 "$bak/speedtest-backend" "$INSTALL_DIR/speedtest-backend.new"
+        mv -f "$INSTALL_DIR/speedtest-backend.new" "$INSTALL_DIR/speedtest-backend"
+        cp -p "$bak/settings.toml" "$SETTINGS"
+        cp -p "$bak/unit" "$UNIT"
+        if [[ -f $bak/VERSION ]]; then cp -p "$bak/VERSION" "$INSTALL_DIR/VERSION"; else rm -f "$INSTALL_DIR/VERSION"; fi
+        systemctl daemon-reload
+        if systemctl is-enabled -q "$APP" 2>/dev/null; then
+            systemctl restart "$APP" || true
+            sleep 2
+            systemctl is-active -q "$APP" && ok "serviço de volta na versão anterior ($was_backend)" \
+                || warn "o serviço não voltou. Veja: journalctl -u $APP -n 50"
+        fi
+        die "a atualização falhou e foi desfeita. Ela só é tentada de novo quando sair outra versão."
+    fi
+
+    # Deu certo: este instalador passa a ser o que roda nas próximas vezes.
+    rm -f "$STATE_DIR/failed-backend"
+    setup_auto_update
+    rm -f "$STATE_DIR"/install-*.sh "$bak"/*
+    printf '\n%s✓ %s%s Instalador %s, speedtest-go %s.\n' "$GRN$B" "$( ((changed)) && echo Atualizado. || echo "Tudo em dia.")" "$RST" \
+        "$VERSION_SCRIPT" "$(installed_backend)"
+}
+
 # ----------------------------------------------------------------------------- remover
 
 uninstall() {
@@ -722,8 +986,8 @@ uninstall() {
     local port=""
     [[ -r $ANSWERS ]] && port=$(. "$ANSWERS"; echo "$PORT")
     (( ASSUME_YES )) || confirm "Remover o serviço, o binário e a configuração?" n || die "cancelado."
-    systemctl disable --now "$APP" >/dev/null 2>&1 || true
-    rm -f "$UNIT" "$SYSCTL_FILE" "$LE_HOOK"
+    systemctl disable --now "$APP" "$APP-update.timer" >/dev/null 2>&1 || true
+    rm -f "$UNIT" "$UPD_UNIT" "$UPD_TIMER" "$SELF_BIN" "$SYSCTL_FILE" "$LE_HOOK"
     systemctl daemon-reload || true
     if [[ -n $port ]]; then
         if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then ufw delete allow "$port/tcp" >/dev/null 2>&1 || true; fi
@@ -731,7 +995,7 @@ uninstall() {
             firewall-cmd -q --permanent --remove-port="$port/tcp" 2>/dev/null && firewall-cmd -q --reload || true
         fi
     fi
-    rm -rf "$INSTALL_DIR" "$CONF_DIR"
+    rm -rf "$INSTALL_DIR" "$CONF_DIR" "$STATE_DIR"
     userdel "$APP" >/dev/null 2>&1 || true
     ok "removido. O certificado do Let's Encrypt foi mantido em /etc/letsencrypt."
     info "Lembre de apagar o registro TXT $TXT_NAME do DNS."
@@ -746,6 +1010,8 @@ main() {
     detect_system
     if [[ $ACTION == uninstall ]]; then uninstall; exit 0; fi
     ensure_tools
+    if [[ $ACTION == update ]]; then update; exit 0; fi
+    if [[ $ACTION == toggle ]]; then toggle_auto_update; exit 0; fi
     fetch_panel
     ask_answers
     create_user
@@ -757,6 +1023,7 @@ main() {
     start_service
     self_test
     save_answers
+    setup_auto_update
     register_done
     print_dns
     printf '\n%s✓ Instalação concluída.%s Servidor: https://%s:%s/\n' "$GRN$B" "$RST" "$HOST" "$PORT"

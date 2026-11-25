@@ -67,6 +67,9 @@ Depois mostra um resumo e só instala se você confirmar.
 | `/etc/l1speed/DNS-BIND.txt` | As instruções de DNS mostradas no fim. |
 | `l1speed.service` | Serviço do systemd, com usuário próprio e sem acesso de escrita ao sistema. |
 | `/etc/sysctl.d/90-l1speed.conf` | Ajustes de rede, se você aceitar. |
+| `/usr/local/sbin/l1speed` | Cópia do instalador, usada pela atualização automática. |
+| `l1speed-update.timer` | Atualização automática diária (veja abaixo). |
+| `/var/lib/l1speed/` | Cópia de segurança da versão anterior durante a atualização. |
 
 O firewall (ufw ou firewalld) é liberado na porta escolhida quando está ativo.
 Com Let's Encrypt, um hook copia o certificado renovado e reinicia o serviço.
@@ -93,11 +96,45 @@ v=l1speed1; url=https://speed1.provedor.com.br:8443/; nome=Provedor Exemplo 10G;
 Antes do DNS, já dá para testar no app: **Velocidade > Servidor > Servidor do
 provedor**, digitando `speed1.provedor.com.br:8443`.
 
-## Reconfigurar, atualizar e remover
+## Atualização automática
+
+O servidor se atualiza sozinho: o provedor não precisa acompanhar as versões.
+Todo dia, num horário sorteado entre 3h e 6h, o timer `l1speed-update`:
+
+1. Confere se saiu um instalador novo (a última
+   [Release](https://github.com/wilsonritt/l1-speed-server/releases) deste
+   repositório) e, se saiu, passa a usá-lo.
+2. Confere se saiu um speedtest-go novo e baixa com o SHA-256 conferido.
+3. Só reinicia o serviço se algo mudou de verdade. Depois de reiniciar, faz o
+   mesmo teste da instalação (latência, download e upload).
+4. Se o serviço não subir ou não passar no teste, volta sozinho para a versão
+   anterior e não tenta de novo aquela versão. O erro fica no log.
+
+```sh
+systemctl list-timers l1speed-update    # quando é a próxima
+journalctl -u l1speed-update            # o que aconteceu nas últimas
+sudo l1speed --update                   # atualizar agora
+sudo l1speed --no-auto-update           # desligar (--auto-update religa)
+```
+
+Servidor instalado antes do instalador 1.2.0 não tem a atualização
+automática. Para ligar, rode uma vez (não pergunta nada nem muda as
+respostas):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wilsonritt/l1-speed-server/main/install.sh -o install.sh && sudo bash install.sh --update
+```
+
+Para publicar uma versão: suba `VERSION_SCRIPT` no `install.sh` e crie a tag
+`vX.Y.Z` igual. O workflow `release` cria a Release, e os servidores pegam na
+madrugada seguinte. O que está só no `main` vale para instalações novas, mas
+não chega sozinho aos servidores já instalados.
+
+## Reconfigurar e remover
 
 ```sh
 sudo bash install.sh              # roda de novo: reaproveita as respostas e baixa a versão mais nova
-sudo bash install.sh --uninstall  # remove serviço, binário e configuração
+sudo bash install.sh --uninstall  # remove serviço, binário, timer e configuração
 ```
 
 O certificado do Let's Encrypt fica em `/etc/letsencrypt` ao remover.
@@ -128,6 +165,7 @@ sudo L1S_HOST=speed1.provedor.com.br L1S_NAME="Provedor Exemplo 10G" L1S_PORT=84
 | `L1S_CODE` | Código gerado no painel (o mesmo que `--code`). |
 | `L1S_ISP_URL` | Endereço do painel. Padrão: `https://isp.l1diag.l1sistemas.com.br`. |
 | `L1S_BACKEND_FILE` | Pacote `.tar.gz` local do speedtest-go, para servidor sem acesso ao GitHub. |
+| `L1S_AUTO_UPDATE` | `s` (padrão) ou `n` para a atualização automática. |
 
 ## Problemas comuns
 
