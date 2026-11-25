@@ -535,6 +535,7 @@ create_user() {
 write_settings() {
     step "Configurando o serviço"
     install -d -m 0750 -o root -g "$APP" "$CONF_DIR"
+    install -d -m 0755 "$INSTALL_DIR/www"
     # Mantém a senha das estatísticas: assim o arquivo só muda quando a configuração muda de verdade.
     local stats_pw
     stats_pw=$(sed -n 's/^statistics_password="\([0-9a-f]*\)"$/\1/p' "$SETTINGS" 2>/dev/null | head -1 || true)
@@ -547,7 +548,8 @@ proxyprotocol_port=0
 server_lat=0
 server_lng=0
 ipinfo_api_key=""
-assets_path=""
+# Só a página de status (l1speed.json), que o painel L1 Diag ISP lê para mostrar a versão.
+assets_path="$INSTALL_DIR/www"
 statistics_password="$stats_pw"
 redact_ip_addresses=true
 # Não grava resultados nem endereços IP.
@@ -858,6 +860,24 @@ toggle_auto_update() {
     setup_auto_update
 }
 
+# Publica em https://servidor:porta/l1speed.json a versão e o resultado da última atualização, para o painel L1 Diag
+# ISP mostrar e avisar quando o servidor fica desatualizado. Não tem nada além disso.
+write_status() { # write_status ok|falhou [o que falhou]
+    local www="$INSTALL_DIR/www" inst auto=true
+    inst=$(sed -n 's/^VERSION_SCRIPT="\(.*\)"$/\1/p' "$SELF_BIN" 2>/dev/null | head -1 || true)
+    [[ -n $inst ]] || inst=$VERSION_SCRIPT
+    [[ -f $UPD_TIMER ]] || auto=false
+    install -d -m 0755 "$www"
+    printf '{"installer":"%s","backend":"%s","auto_update":%s,"checked":"%s","result":"%s","failed":"%s"}\n' \
+        "$inst" "$(installed_backend)" "$auto" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-}" > "$www/l1speed.json.new"
+    chmod 0644 "$www/l1speed.json.new"
+    mv -f "$www/l1speed.json.new" "$www/l1speed.json"
+    if [[ ! -f $www/index.html ]]; then
+        printf '<!doctype html><meta charset="utf-8"><title>L1 Diag</title><p>Servidor de velocidade do L1 Diag.</p>\n' > "$www/index.html"
+        chmod 0644 "$www/index.html"
+    fi
+}
+
 # newer A B: A é uma versão mais nova que B.
 newer() { [[ $1 != "$2" && $(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1) == "$1" ]]; }
 
@@ -954,8 +974,13 @@ update() {
 
     if (( failed )); then
         step "Voltando para a versão anterior"
-        [[ $(installed_backend) != "$was_backend" ]] && installed_backend > "$STATE_DIR/failed-backend"
-        [[ -n ${L1S_SELF_UPDATED:-} ]] && echo "$VERSION_SCRIPT" > "$STATE_DIR/failed-script"
+        local what=""
+        if [[ $(installed_backend) != "$was_backend" ]]; then
+            installed_backend > "$STATE_DIR/failed-backend"; what="speedtest-go $(installed_backend)"
+        fi
+        if [[ -n ${L1S_SELF_UPDATED:-} ]]; then
+            echo "$VERSION_SCRIPT" > "$STATE_DIR/failed-script"; what="instalador $VERSION_SCRIPT${what:+ e $what}"
+        fi
         install -m 0755 "$bak/speedtest-backend" "$INSTALL_DIR/speedtest-backend.new"
         mv -f "$INSTALL_DIR/speedtest-backend.new" "$INSTALL_DIR/speedtest-backend"
         cp -p "$bak/settings.toml" "$SETTINGS"
@@ -968,12 +993,14 @@ update() {
             systemctl is-active -q "$APP" && ok "serviço de volta na versão anterior ($was_backend)" \
                 || warn "o serviço não voltou. Veja: journalctl -u $APP -n 50"
         fi
+        write_status falhou "$what"
         die "a atualização falhou e foi desfeita. Ela só é tentada de novo quando sair outra versão."
     fi
 
     # Deu certo: este instalador passa a ser o que roda nas próximas vezes.
     rm -f "$STATE_DIR/failed-backend"
     setup_auto_update
+    write_status ok
     rm -f "$STATE_DIR"/install-*.sh "$bak"/*
     printf '\n%s✓ %s%s Instalador %s, speedtest-go %s.\n' "$GRN$B" "$( ((changed)) && echo Atualizado. || echo "Tudo em dia.")" "$RST" \
         "$VERSION_SCRIPT" "$(installed_backend)"
@@ -1024,6 +1051,7 @@ main() {
     self_test
     save_answers
     setup_auto_update
+    write_status ok
     register_done
     print_dns
     printf '\n%s✓ Instalação concluída.%s Servidor: https://%s:%s/\n' "$GRN$B" "$RST" "$HOST" "$PORT"

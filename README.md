@@ -67,6 +67,7 @@ Depois mostra um resumo e só instala se você confirmar.
 | `/etc/l1speed/DNS-BIND.txt` | As instruções de DNS mostradas no fim. |
 | `l1speed.service` | Serviço do systemd, com usuário próprio e sem acesso de escrita ao sistema. |
 | `/etc/sysctl.d/90-l1speed.conf` | Ajustes de rede, se você aceitar. |
+| `/opt/l1speed/www/l1speed.json` | Versão e resultado da última atualização, lido pelo painel L1 Diag ISP em `https://servidor:porta/l1speed.json`. |
 | `/usr/local/sbin/l1speed` | Cópia do instalador, usada pela atualização automática. |
 | `l1speed-update.timer` | Atualização automática diária (veja abaixo). |
 | `/var/lib/l1speed/` | Cópia de segurança da versão anterior durante a atualização. |
